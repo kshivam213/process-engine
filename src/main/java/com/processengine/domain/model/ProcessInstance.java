@@ -12,6 +12,7 @@ public class ProcessInstance {
     public String id;
     public ProcessDefinition definition;
     public Map<String, StepInstance> steps = new HashMap<>();
+    public Map<String, Object> fields = new HashMap<>();
 
     public ProcessInstance(String id, ProcessDefinition def) {
         this.id = id;

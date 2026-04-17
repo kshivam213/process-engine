@@ -288,6 +288,7 @@ The partial composite index `idx_pis_status_deadline` on `(status, deadline_at) 
 4. Set `escalated = TRUE`.
 5. Insert an `audit_log` entry capturing the previous assignee, new assignee, and reason (`"deadline exceeded"`).
 6. Optionally insert a `step_actions` row with `action = 'ESCALATED'` for the operational record.
+7. Worker uses row-level locking (FOR UPDATE SKIP LOCKED) to avoid duplicate escalation in concurrent environments
 
 ---
 
@@ -306,3 +307,192 @@ process_definitions
                       │
                       └──< audit_log         (append-only state-change ledger)
 ```
+
+---
+
+## State Machine Design
+
+### Overview
+
+The system models workflow execution as a **state machine over `process_instance_steps.status`**, where:
+
+* `step_actions` represent **events** (user/system actions)
+* `process_instance_steps.status` represents the **current state**
+* Transitions are derived by evaluating actions against step configuration
+
+This separation ensures:
+
+* deterministic behavior
+* strong auditability
+* flexibility across step types
+
+---
+
+### Representing Valid Transitions
+
+Valid transitions are represented using a **transition map in code**, keeping the model simple and explicit.
+
+```
+enum class Status {
+    PENDING,
+    IN_PROGRESS,
+    COMPLETED,
+    REJECTED,
+    SKIPPED,
+    ESCALATED
+}
+
+val validTransitions = mapOf(
+    PENDING to setOf(IN_PROGRESS),
+    IN_PROGRESS to setOf(COMPLETED, REJECTED, ESCALATED),
+    REJECTED to setOf(IN_PROGRESS),   // reopen flow
+    ESCALATED to setOf(IN_PROGRESS)   // after reassignment
+)
+```
+
+---
+
+### Enforcing Valid Transitions
+
+All transitions are enforced in the **application layer (engine)** before state mutation.
+
+```
+fun transition(step: StepInstance, next: Status) {
+    val allowed = validTransitions[step.status] ?: emptySet()
+
+    if (next !in allowed) {
+        throw IllegalStateException(
+            "Invalid transition from ${step.status} to $next"
+        )
+    }
+
+    step.status = next
+}
+```
+
+**Key Principle:**
+
+* The engine is the **single authority** for state transitions
+* No direct DB updates are allowed without validation
+
+---
+
+### Transition Evaluation (Step-Type Driven)
+
+While transitions are structurally defined by the state machine, the **conditions for transition depend on step type and configuration**.
+
+---
+
+#### Example 1: Task Step
+
+```json
+{
+  "type": "TASK"
+}
+```
+
+**Logic:**
+
+```
+if (action == COMPLETED) {
+    transition(step, COMPLETED)
+}
+```
+
+---
+
+#### Example 2: Approval Step (Parallel)
+
+```json
+{
+  "approval": {
+    "required_approvals": 2,
+    "approvers": ["QA_MANAGER", "DEPT_HEAD"]
+  }
+}
+```
+
+**Logic:**
+
+```
+val approvals = countActions(step.id, APPROVED)
+
+if (approvals >= requiredApprovals) {
+    transition(step, COMPLETED)
+}
+```
+
+If any actor rejects:
+
+```
+if (action == REJECTED) {
+    transition(step, REJECTED)
+}
+```
+
+---
+
+#### Example 3: Conditional Routing
+
+```json
+{
+  "routing": {
+    "on_reject": { "goto_step_id": "step-2-id" }
+  }
+}
+```
+
+**Logic:**
+
+```
+if (step.status == REJECTED) {
+    activateStep(targetStepId)
+}
+```
+
+---
+
+### Parallel Approval Handling
+
+Parallel approvals are modeled using either:
+
+* a single step with multiple actors (via config), OR
+* multiple steps grouped by `parallel_group_id`
+
+**Completion Rule:**
+
+```
+val groupSteps = getStepsByParallelGroup(step.parallelGroupId)
+
+if (groupSteps.all { it.status in setOf(COMPLETED) }) {
+    advanceToNextStep()
+}
+```
+
+**Rejection Rule:**
+
+* Any step in the group moving to `REJECTED` triggers:
+
+  * group termination
+  * routing logic (e.g., return to previous step)
+
+---
+
+### When Does the Engine Advance?
+
+The engine advances when:
+
+1. **Single step completes** — move to next step in sequence
+2. **Parallel group completes** — all steps in group reach terminal state
+3. **Conditional routing triggers** — based on config (e.g., rejection → previous step)
+
+---
+
+### Design Summary
+
+* State machine is **generic and minimal**
+* Business logic is **config-driven**
+* Actions are **inputs**, not states
+* Step status is **derived and enforced centrally**
+
+> The system is modeled as a **state machine over step instances**, where actions act as events and transitions are validated centrally, ensuring correctness and auditability.

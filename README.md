@@ -496,3 +496,87 @@ The engine advances when:
 * Step status is **derived and enforced centrally**
 
 > The system is modeled as a **state machine over step instances**, where actions act as events and transitions are validated centrally, ensuring correctness and auditability.
+
+---
+
+## Audit Trail Design
+
+### Overview
+
+This module provides an audit trail mechanism to track all state-changing actions in the system. It ensures traceability, immutability, and accountability for critical operations.
+
+---
+
+### What Gets Logged
+
+We capture all important changes in the system:
+
+* Entity creation, updates, and deletion
+* Status transitions (e.g., PENDING → APPROVED)
+* User or system performing the action
+* Timestamp of the action
+* Before and after values of the entity
+
+---
+
+### Audit Log Schema
+
+```
+audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  entity_type VARCHAR,        -- e.g., "payment_account"
+  entity_id BIGINT,
+  action VARCHAR,             -- CREATE / UPDATE / DELETE / STATUS_CHANGE
+  old_value JSONB,
+  new_value JSONB,
+  performed_by VARCHAR,       -- user_id / system
+  timestamp TIMESTAMP,
+  request_id VARCHAR          -- for traceability
+)
+```
+
+---
+
+### Immutability Guarantee
+
+* Audit logs are stored in an **append-only table**
+* No UPDATE or DELETE operations are allowed
+* Database permissions are restricted to allow only INSERT
+* Optional: Database triggers can be added to prevent accidental modifications
+
+---
+
+### Data Integrity & Tamper Detection
+
+* Each audit record includes metadata such as timestamp and request_id
+* Optional enhancement:
+
+  * Hash chaining (each record stores hash of previous record)
+  * External storage (e.g., S3) for periodic snapshots
+
+These mechanisms help detect any unauthorized changes to audit logs.
+
+---
+
+### Key Principles
+
+* **Traceability**: Every action can be traced back to a user/system
+* **Immutability**: Once written, logs cannot be modified
+* **Transparency**: Full history of changes is preserved
+* **Scalability**: JSONB allows flexible schema for different entities
+
+---
+
+### Example Use Case
+
+When a payment account status changes:
+
+* Old status and new status are recorded
+* User who performed the action is logged
+* Timestamp ensures ordering of events
+
+---
+
+### Summary
+
+This audit trail design ensures reliable tracking of system changes with strong guarantees around immutability and integrity, making it suitable for compliance and debugging purposes.
